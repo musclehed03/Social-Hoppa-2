@@ -14,9 +14,10 @@ twitter_bp = Blueprint('twitter', __name__)
 # Twitter OAuth 2.0 Endpoints
 AUTH_URL = "https://twitter.com/i/oauth2/authorize"
 TOKEN_URL = "https://api.twitter.com/2/oauth2/token"
+USER_INFO_URL = "https://api.twitter.com/2/users/me"
 
-# Scopes for posting tweets and reading user info
-# 'offline.access' is required to get a refresh token
+# Scopes for Twitter v2 API
+# 'offline.access' is required for refresh tokens
 SCOPES = "tweet.read tweet.write users.read offline.access"
 
 def generate_pkce_pair():
@@ -34,7 +35,7 @@ def initiate_twitter_auth():
     redirect_uri = os.environ.get('TWITTER_REDIRECT_URI')
     
     if not client_id or not redirect_uri:
-        return "Twitter credentials not configured in environment variables.", 500
+        return jsonify({"error": "Twitter credentials not configured in environment variables."}), 500
 
     # Generate PKCE and state for security
     code_verifier, code_challenge = generate_pkce_pair()
@@ -65,11 +66,11 @@ def twitter_callback():
     error = request.args.get('error')
 
     if error:
-        return f"Twitter OAuth error: {error}", 400
+        return jsonify({"error": f"Twitter OAuth error: {error}"}), 400
 
     # Verify state to prevent CSRF
     if state != session.get('twitter_oauth_state'):
-        return "Invalid OAuth state.", 400
+        return jsonify({"error": "Invalid OAuth state."}), 400
 
     code_verifier = session.get('twitter_oauth_code_verifier')
     client_id = os.environ.get('TWITTER_CLIENT_ID')
@@ -95,38 +96,38 @@ def twitter_callback():
     response = requests.post(TOKEN_URL, data=token_data, headers=headers)
     
     if not response.ok:
-        return f"Failed to exchange code for token: {response.text}", 400
+        return jsonify({"error": "Failed to exchange code for token", "details": response.text}), 400
 
     tokens = response.json()
     
     # Get user info from Twitter to identify the account
-    user_info_url = "https://api.twitter.com/2/users/me"
     user_headers = {'Authorization': f"Bearer {tokens['access_token']}"}
-    user_response = requests.get(user_info_url, headers=user_headers)
+    user_response = requests.get(USER_INFO_URL, headers=user_headers)
     
     if not user_response.ok:
-        return f"Failed to fetch user info: {user_response.text}", 400
+        return jsonify({"error": "Failed to fetch user info", "details": user_response.text}), 400
     
     twitter_user = user_response.json().get('data', {})
     twitter_id = twitter_user.get('id')
 
     # Store tokens in the database
     # Assuming the current user is logged in and stored in session['user_id']
+    # If not logged in, we'll use a dummy user for demonstration
     user_id = session.get('user_id')
     if not user_id:
-        # For demonstration, create or get a dummy user if not logged in
         user = User.query.first()
         if not user:
-            user = User(username='testuser', email='test@example.com')
+            # Fallback for demonstration: create a user if none exists
+            user = User(email='demo@example.com', password_hash='dummy')
             db.session.add(user)
             db.session.commit()
         user_id = user.id
 
     # Check if a connection already exists for this user and platform
-    connection = SocialConnection.query.filter_by(user_id=user_id, platform='twitter').first()
+    connection = SocialConnection.query.filter_by(user_id=user_id, platform_name='twitter').first()
     
     if not connection:
-        connection = SocialConnection(user_id=user_id, platform='twitter')
+        connection = SocialConnection(user_id=user_id, platform_name='twitter')
         db.session.add(connection)
 
     connection.platform_user_id = twitter_id
@@ -144,4 +145,8 @@ def twitter_callback():
     session.pop('twitter_oauth_state', None)
     session.pop('twitter_oauth_code_verifier', None)
 
-    return jsonify({"message": "Twitter account connected successfully!", "twitter_id": twitter_id})
+    return jsonify({
+        "message": "Twitter account connected successfully!",
+        "twitter_id": twitter_id,
+        "platform": "twitter"
+    })
